@@ -1,0 +1,9 @@
+cookies: {}
+log:
+  level: info
+  json: true
+ws:
+  read_buffer_size: 4096
+  write_buffer_size: 4096
+  heartbeat: 15s
+  token_refresh: 10m
