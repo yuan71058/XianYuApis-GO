@@ -1,13 +1,15 @@
 # XianYuApis-GO
 
-闲鱼 API Go 语言实现，从 [XianYuApis (Python)](https://github.com/cv-cat/XianYuApis) 迁移而来。
+闲鱼 API Go 语言实现，从 [XianYuApis (Python)](https://github.com/cv-cat/XianYuApis) 迁移而来，参考 [xianyu-auto-reply](https://github.com/zhinianboke/xianyu-auto-reply) 修复消息解析。
 
 ## 功能
 
 - **扫码登录** — 终端二维码 / URL 两种方式
+- **手动 Cookie+Token 登录** — 避免风控，从浏览器手动获取（推荐）
 - **WebSocket 实时消息** — 收发文字/图片，心跳保活，Token 自动刷新
-- **HTTP API** — 商品发布、详情查询、图片上传、Token 管理
-- **消息加解密** — Base64 + MessagePack 协议，与原版 JS/Python 完全等价
+- **多类型消息解析** — 文字/图片/商品卡片/转账/位置/语音，完整支持闲鱼消息协议
+- **HTTP API** — 商品发布、详情查询、图片上传、Token 管理、自动确认发货
+- **消息加解密** — Base64 + MessagePack 协议，自定义 msgpack 解码器支持整数键转字符串键
 
 ## 项目结构
 
@@ -16,17 +18,17 @@ xianyuapis/
 ├── cmd/demo/main.go        # 详细调用示例（含完整注释）
 ├── config/                  # YAML 配置 + 环境变量
 ├── pkg/
-│   ├── apis/                # HTTP API 封装（登录、商品、上传）
+│   ├── apis/                # HTTP API 封装（登录、商品、上传、确认发货）
 │   │   ├── api.go           #   XianyuAPI 核心 + mtop 请求封装
-│   │   ├── login.go         #   GetToken / RefreshToken
+│   │   ├── login.go         #   GetToken / RefreshToken（含风控检测）
 │   │   ├── qrcode.go        #   扫码登录完整流程
 │   │   ├── cookies.go       #   BuildInitialCookies
 │   │   ├── upload.go        #   UploadMedia 图片上传
-│   │   └── product.go       #   GetItemInfo / PublishItem
+│   │   └── product.go       #   GetItemInfo / PublishItem / ConfirmShipping
 │   ├── ws/                  # WebSocket 通信（连接、收发、心跳）
 │   │   ├── client.go        #   XianyuWS 结构体 + 构造函数
-│   │   ├── connect.go       #   Connect / init / heartbeat
-│   │   ├── receiver.go      #   Start / handleMessage / ACK
+│   │   ├── connect.go       #   Connect / ConnectWithToken / init / heartbeat
+│   │   ├── receiver.go      #   Start / handleMessage / ACK / 消息解析
 │   │   ├── sender.go        #   SendText / SendImage
 │   │   └── conversation.go  #   ListAllConversations / CreateChat
 │   ├── msg/                 # 消息类型定义
@@ -37,7 +39,7 @@ xianyuapis/
 │   │   └── login.go         #   QrcodeLoginConfig / QRCodeData
 │   └── util/                # 签名、解密、ID 生成、Cookie 工具
 │       ├── sign.go          #   GenerateSign（MD5 签名）
-│       ├── decrypt.go       #   Decrypt（Base64 + MessagePack 反序列化）
+│       ├── decrypt.go       #   Decrypt（自定义 msgpack 解码器，整数键→字符串键）
 │       ├── gen.go           #   GenerateMid / UUID / DeviceID
 │       ├── cookie.go        #   Cookie 解析/构建/Jar 操作
 │       ├── tfstk.go         #   GenerateTFstk（Node.js 子进程）
@@ -55,22 +57,20 @@ xianyuapis/
 ### 前置条件
 
 - Go 1.22+
-- Node.js（tfstk 生成需要）
 
 ### 安装
 
 ```bash
 git clone https://github.com/yuan71058/XianYuApis-GO.git
 cd XianYuApis-GO/xianyuapis
-make init
+go mod tidy
 ```
 
 ### 运行
 
 ```bash
-# 扫码登录 + WebSocket 消息监听
-make build
-./bin/xianyuapis
+go build -o bin/demo.exe ./cmd/demo/
+./bin/demo.exe
 ```
 
 或直接运行：
@@ -85,7 +85,18 @@ go run ./cmd/demo/
 
 ### 1. 登录
 
-#### 方式一：扫码登录（推荐）
+#### 方式一：手动 Cookie + Token 登录（推荐，避免风控）
+
+1. 浏览器打开 `https://www.goofish.com` 并登录
+2. F12 → Console → 先加载 MD5 库，再获取 Token
+3. F12 → Network → 复制完整 Cookie
+
+```go
+api, accessToken, err := manualCookieAndTokenLogin()
+// 内部流程: 输入unb → 生成deviceID → 浏览器获取Token → 输入Cookie
+```
+
+#### 方式二：扫码登录
 
 自动构建初始 Cookie → 生成二维码 → 轮询扫码状态 → 完成登录。
 
@@ -95,33 +106,18 @@ api, err := apis.QrcodeLogin(apis.QrcodeLoginConfig{
     Timeout:      120 * time.Second, // 超时时间
     ShowQR:       true,              // 终端打印二维码
 })
-if err != nil {
-    log.Fatal(err)
-}
-fmt.Println("登录成功，设备ID:", api.DeviceID())
 ```
 
-#### 方式二：已有 Cookie 字典
-
-从浏览器 F12 → Application → Cookies → .goofish.com 复制关键字段。
+#### 方式三：已有 Cookie 字典
 
 ```go
 cookies := map[string]string{
-    "unb":       "123456789",                // 用户 ID（必填）
-    "tracknick": "我的昵称",                   // 用户昵称
-    "_m_h5_tk":  "abcdef_1718000000000",     // mtop 签名 token
-    "cookie2":   "xxxxxxxxxxxxxxxx",         // 会话标识
-    "cna":       "yyyyyyyyyyyyyyyy",         // 设备标识
+    "unb":       "123456789",
+    "tracknick": "我的昵称",
+    "_m_h5_tk":  "abcdef_1718000000000",
+    "cookie2":   "xxxxxxxxxxxxxxxx",  // HttpOnly，必须从Network请求头复制
+    "sgcookie":  "E100xxx...",         // HttpOnly，必须从Network请求头复制
 }
-api, err := apis.New(cookies, "")  // deviceID 为空则自动生成
-```
-
-#### 方式三：从 Cookie 字符串解析
-
-```go
-// 浏览器复制的格式: "key1=val1; key2=val2; key3=val3"
-cookieStr := "unb=123456789; tracknick=我的昵称; _m_h5_tk=abcdef_1718000000"
-cookies := util.ParseCookies(cookieStr)
 api, err := apis.New(cookies, "")
 ```
 
@@ -133,26 +129,21 @@ api, err := apis.New(cookies, "")
 ctx := context.Background()
 
 // 获取 WebSocket 连接所需的 accessToken
-// 内部自动处理"令牌过期"重试（最多 3 次）
 token, err := api.GetToken(ctx)
 
-// 刷新登录态（建议每 10 分钟调用一次，WebSocket 客户端已内置自动刷新）
+// 刷新登录态（WebSocket 客户端已内置自动刷新）
 err = api.RefreshToken(ctx)
 ```
 
 #### 2.2 商品查询
 
 ```go
-// itemID 从闲鱼商品页面 URL 获取
-// 例如 https://www.goofish.com/item?id=891198795482
 itemInfo, err := api.GetItemInfo(ctx, "891198795482")
-// 返回 map[string]any，包含完整商品详情 JSON
 ```
 
 #### 2.3 图片上传
 
 ```go
-// 支持 PNG/JPG/JPEG/GIF，返回 CDN URL 和尺寸
 result, err := api.UploadMedia(ctx, "./photo.png")
 fmt.Println(result.URL, result.Width, result.Height)
 ```
@@ -160,20 +151,21 @@ fmt.Println(result.URL, result.Width, result.Height)
 #### 2.4 商品发布
 
 ```go
-// PublishItem 内部自动执行: 上传图片 → 获取推荐标签 → 获取默认地址 → 提交发布
 result, err := api.PublishItem(ctx,
-    []string{"./product1.jpg", "./product2.jpg"},  // 图片路径（最多 9 张）
-    "九成新机械键盘 自用半年 功能完好",                // 商品描述
-    &model.Price{                                 // 价格，nil 使用默认定价
-        CurrentPrice:  299.0,
-        OriginalPrice: 599.0,
-    },
-    model.DeliverySettings{                       // 配送设置
-        Choice:        "包邮",    // "包邮" | "按距离计费" | "一口价" | "无需邮寄"
-        PostPrice:     0,       // 运费（仅 "一口价" 时有效）
-        CanSelfPickup: false,   // 是否支持自提
-    },
+    []string{"./product1.jpg", "./product2.jpg"},
+    "九成新机械键盘 自用半年 功能完好",
+    &model.Price{CurrentPrice: 299.0, OriginalPrice: 599.0},
+    model.DeliverySettings{Choice: "包邮"},
 )
+```
+
+#### 2.5 自动确认发货
+
+```go
+// 调用 mtop.taobao.idle.logistic.consign.dummy 确认订单发货
+// 适用于虚拟商品自动发货场景
+result, err := api.ConfirmShipping(ctx, "订单ID")
+// 成功时 ret 包含 "SUCCESS::调用成功"
 ```
 
 ### 3. WebSocket 实时通信
@@ -181,28 +173,25 @@ result, err := api.PublishItem(ctx,
 #### 3.1 创建客户端并连接
 
 ```go
-// 从 API 客户端提取 Cookie（WebSocket 需要共享登录态）
-cookies := extractCookiesFromAPI(api)
-
-// 创建 WebSocket 客户端
-wsClient, err := ws.New(cookies, api.DeviceID())
+// 从 API 客户端创建 WebSocket 客户端（共享登录态）
+wsClient, err := ws.NewWithAPI(api)
 
 // 设置消息处理回调
 wsClient.SetMessageHandler(func(m *msg.Message) {
     switch {
     case m.IsText():
-        fmt.Printf("[文字] %s: %s\n", m.SenderName, m.Content)
+        fmt.Printf("[文字] %s(%s): %s\n", m.SenderName, m.SenderID, m.Content)
     case m.IsImage():
-        fmt.Printf("[图片] %s: %s (%dx%d)\n",
-            m.SenderName, m.ImageURL, m.ImageWidth, m.ImageHeight)
+        fmt.Printf("[图片] %s(%s): %s (%dx%d)\n",
+            m.SenderName, m.SenderID, m.ImageURL, m.ImageWidth, m.ImageHeight)
     }
 })
 
 // 启动 Token 自动刷新（每 10 分钟）
 wsClient.StartTokenRefresher()
 
-// 建立连接（内部: 连接 → 获取Token → 注册 → 同步状态 → 启动心跳）
-wsClient.Connect(ctx)
+// 建立连接（支持手动传入 Token）
+wsClient.ConnectWithToken(ctx, accessToken)
 
 // 启动消息接收循环（阻塞）
 wsClient.Start()
@@ -212,8 +201,6 @@ wsClient.Start()
 
 ```go
 // 发送文字消息
-// cid: 会话 ID（从收到的消息中获取，不含 @goofish 后缀）
-// toID: 接收方用户 ID
 wsClient.SendText(ctx, "conversation_id", "receiver_id", "你好")
 
 // 发送图片消息（需先上传获取 URL）
@@ -222,74 +209,32 @@ wsClient.SendImage(ctx, "conversation_id", "receiver_id",
     uploadResult.URL, uploadResult.Width, uploadResult.Height)
 ```
 
-#### 3.3 会话管理
+#### 3.3 优雅退出
 
 ```go
-// 创建新会话（可关联商品 ID）
-wsClient.CreateChat(ctx, "target_user_id", "891198795482")
-
-// 获取历史聊天记录（建立临时连接，获取完自动关闭）
-history, err := wsClient.ListAllConversations(ctx, "conversation_id")
-for _, h := range history {
-    fmt.Printf("%s(%s): %v\n", h.SenderName, h.SenderID, h.Message)
-}
-```
-
-#### 3.4 优雅退出
-
-```go
-// 监听 Ctrl+C 信号
 sigCtx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 defer cancel()
-
-// Stop() 取消内部 context + 发送 WebSocket 关闭帧
 defer wsClient.Stop()
 ```
 
-### 4. 工具函数
+### 4. 消息类型
 
-#### 4.1 签名生成
+闲鱼 WebSocket 推送消息支持以下类型:
 
-```go
-// 闲鱼 mtop API 签名公式: MD5(token + "&" + timestamp + "&" + appKey + "&" + data)
-// appKey 固定值 "34839810"
-timestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
-token := "abcdef1234567890"  // 从 _m_h5_tk Cookie 下划线前提取
-data := `{"itemId":"891198795482"}`
-sign := util.GenerateSign(timestamp, token, data)
-```
+| contentType | 类型 | 解析内容 |
+|:-----------:|------|---------|
+| 1 | 文字消息 | `text.text` 字段 |
+| 2 | 图片消息 | `image.pics[].url` + 宽高 |
+| 3 | 语音消息 | `[语音消息]` |
+| 7 | 商品卡片 | `[我想要] 标题 价格 (id:xxx)` |
+| 17 | 转账消息 | `[转账] ¥金额 (交易号:xxx)` |
+| 30 | 位置消息 | `[位置] 经度:xxx 纬度:xxx` |
 
-#### 4.2 消息解密
+消息内容有两种编码格式:
+- **格式1**: `msg6_3["1"]` 为 base64 字符串（文字消息常用）
+- **格式2**: `msg6_3["5"]` 为直接 JSON 字符串（图片/卡片/转账/位置等常用）
 
-```go
-// 闲鱼加密消息格式: Base64(MessagePack(原始数据))
-// 解密后 JSON 结构: {"1": {"2": "cid@goofish", "10": {"reminderTitle": ..., "senderUserId": ...}}}
-decrypted, err := util.Decrypt(encryptedData)
-```
-
-#### 4.3 ID 生成
-
-```go
-mid      := util.GenerateMid()              // 消息 ID: "7381748291023 0"
-uuid     := util.GenerateUUID()             // 请求标识: "-17180000001231"
-deviceID := util.GenerateDeviceID("unb123") // 设备 ID: "a1b2c3d4-...-unb123"
-```
-
-#### 4.4 Cookie 工具
-
-```go
-// 解析 Cookie 字符串为 map
-cookies := util.ParseCookies("unb=123; tracknick=昵称; _m_h5_tk=abc_123")
-
-// 构建 Cookie 字符串
-str := util.BuildCookieString(cookies)
-
-// 从 CookieJar 读取/写入
-val  := util.GetCookieFromJar(jar, ".goofish.com", "unb")
-util.SetCookieToJar(jar, ".goofish.com", "cna", "xxx", "/")
-```
-
-### 5. Message 结构体字段
+### 5. Message 结构体
 
 ```go
 type Message struct {
@@ -306,33 +251,48 @@ type Message struct {
 }
 ```
 
-## 配置
+### 6. 工具函数
 
-复制 `config/example.yaml` 并修改：
+#### 6.1 签名生成
 
-```yaml
-cookies: {}
-log:
-  level: info
-  json: true
-ws:
-  heartbeat: 15s
-  token_refresh: 10m
+```go
+// 闲鱼 mtop API 签名: MD5(token + "&" + timestamp + "&" + appKey + "&" + data)
+sign := util.GenerateSign(timestamp, token, data)
 ```
 
-环境变量覆盖：
+#### 6.2 消息解密
 
-| 变量 | 说明 |
-|------|------|
-| `XIANYU_COOKIE_UNB` | 用户 unb（覆盖配置文件） |
-| `XIANYU_LOG_LEVEL` | 日志级别 |
-
-## Docker
-
-```bash
-docker build -t xianyuapis .
-docker run -it xianyuapis
+```go
+// 自定义 msgpack 解码器，自动将整数键转为字符串键（与 Python 版对齐）
+decrypted, err := util.Decrypt(encryptedData)
 ```
+
+#### 6.3 ID 生成
+
+```go
+mid      := util.GenerateMid()              // 消息 ID
+uuid     := util.GenerateUUID()             // 请求标识
+deviceID := util.GenerateDeviceID("unb123") // 设备 ID
+```
+
+## 关键技术说明
+
+### 风控规避
+
+- 扫码登录可能触发风控 `FAIL_SYS_USER_VALIDATE`，推荐使用手动 Cookie+Token 方式
+- `document.cookie` 无法获取 HttpOnly 的 `cookie2`、`sgcookie`，必须从 F12→Network→请求头中复制
+- 多次失败后需等待 5-10 分钟再重试
+
+### Token 与 DeviceID 配对
+
+浏览器获取 Token 时使用的 `deviceId` 必须与 Go 的 `/reg` 请求中使用的 `deviceId` 一致，否则返回 401 `device id or appkey is not equal`。Demo 中已自动处理此配对。
+
+### WebSocket 连接注意事项
+
+- 必须禁用压缩（`CompressionDisabled`），服务端不协商 `permessage-deflate`
+- `/reg` 注册后需等待 3 秒冷却，避免 IM 流控错误 400600001
+- Cookie 必须包含 HttpOnly 字段（`cookie2`、`sgcookie`），否则 mtop API 认证失败
+- Ctrl+C 退出时先关闭 WebSocket 连接再取消 context
 
 ## 与 Python 版本的对应关系
 
@@ -343,13 +303,14 @@ docker run -it xianyuapis
 | `utils/goofish_utils.py` | `pkg/util/` |
 | `utils/build_cookies.py` | `pkg/apis/cookies.go` |
 | `message/types.py` | `pkg/msg/` |
+| `push_message_parser.py` | `pkg/ws/receiver.go` |
+| `confirm_service.py` | `pkg/apis/product.go` (ConfirmShipping) |
 
 ## 依赖
 
 | 库 | 用途 |
 |----|------|
 | [nhooyr.io/websocket](https://github.com/coder/websocket) | WebSocket 客户端 |
-| [vmihailenco/msgpack/v5](https://github.com/vmihailenco/msgpack) | MessagePack 解码 |
 | [skip2/go-qrcode](https://github.com/skip2/go-qrcode) | 终端二维码打印 |
 | [go.uber.org/zap](https://go.uber.org/zap) | 结构化日志 |
 | [gopkg.in/yaml.v3](https://gopkg.in/yaml.v3) | YAML 配置解析 |

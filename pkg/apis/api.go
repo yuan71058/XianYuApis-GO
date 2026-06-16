@@ -33,12 +33,13 @@ const (
 //
 // 线程安全: 同一 XianyuAPI 实例可被多个 goroutine 并发调用。
 type XianyuAPI struct {
-	client      *http.Client // 带 CookieJar 的 HTTP 客户端
-	deviceID    string       // 设备 ID
-	baseURL     string       // mtop 基础地址
-	uploadURL   string       // 媒体上传地址
-	passportURL string       // 通行证地址
-	logger      *zap.Logger  // 日志记录器
+	client       *http.Client // 带 CookieJar 的 HTTP 客户端（用于 Cookie 管理）
+	noJarClient  *http.Client // 无 Jar 的 HTTP 客户端（用于发送请求，Cookie 手动设置）
+	deviceID     string       // 设备 ID
+	baseURL      string       // mtop 基础地址
+	uploadURL    string       // 媒体上传地址
+	passportURL  string       // 通行证地址
+	logger       *zap.Logger  // 日志记录器
 }
 
 // New 创建闲鱼 API 实例。
@@ -72,8 +73,10 @@ func New(cookies map[string]string, deviceID string) (*XianyuAPI, error) {
 	}
 
 	// 将传入的 cookies 写入 CookieJar
+	// 关键: 必须使用合法 URL 设置 Cookie（RFC 6265）
+	// .goofish.com 不是合法 URL，必须用 https://www.goofish.com
+	// Cookie 的 Domain 设为 .goofish.com，这样所有子域都能访问
 	for name, value := range cookies {
-		u, _ := url.Parse("https://.goofish.com")
 		cookie := &http.Cookie{
 			Name:     name,
 			Value:    value,
@@ -81,11 +84,14 @@ func New(cookies map[string]string, deviceID string) (*XianyuAPI, error) {
 			Path:     "/",
 			HttpOnly: false,
 		}
+		// 使用合法 URL 设置 Cookie
+		u, _ := url.Parse("https://www.goofish.com")
 		jar.SetCookies(u, []*http.Cookie{cookie})
 	}
 
 	return &XianyuAPI{
 		client:      client,
+		noJarClient: &http.Client{Timeout: 30 * time.Second}, // 无 Jar，Cookie 手动设置
 		deviceID:    deviceID,
 		baseURL:     "https://h5api.m.goofish.com",
 		uploadURL:   "https://stream-upload.goofish.com",
@@ -104,14 +110,66 @@ func (api *XianyuAPI) Client() *http.Client {
 	return api.client
 }
 
+// CookieString 返回 .goofish.com 域下所有 Cookie 的字符串表示。
+// 用于 WebSocket 连接时设置 Cookie header。
+//
+// 与 Python 版 get_session_cookies_str(session) 对齐:
+// 获取所有域下的所有 Cookie，拼接为 "key=value; key2=value2" 格式。
+func (api *XianyuAPI) CookieString() string {
+	var cookies []*http.Cookie
+	seen := make(map[string]bool)
+
+	// 遍历所有可能的域名，收集所有 Cookie
+	for _, domain := range []string{
+		"https://www.goofish.com",
+		"https://goofish.com",
+		"https://h5api.m.goofish.com",
+		"https://passport.goofish.com",
+	} {
+		u, _ := url.Parse(domain)
+		for _, c := range api.client.Jar.Cookies(u) {
+			if !seen[c.Name] {
+				seen[c.Name] = true
+				cookies = append(cookies, c)
+			}
+		}
+	}
+
+	if len(cookies) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, c := range cookies {
+		parts = append(parts, c.Name+"="+c.Value)
+	}
+	return joinStrings(parts, "; ")
+}
+
+// joinStrings 用 sep 连接字符串切片。
+func joinStrings(ss []string, sep string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	result := ss[0]
+	for _, s := range ss[1:] {
+		result += sep + s
+	}
+	return result
+}
+
 // tokenFromCookie 从 CookieJar 中提取 _m_h5_tk 的 token 部分（下划线前）。
 func (api *XianyuAPI) tokenFromCookie() string {
-	u, _ := url.Parse("https://.goofish.com")
-	for _, c := range api.client.Jar.Cookies(u) {
-		if c.Name == "_m_h5_tk" {
-			parts := bytes.SplitN([]byte(c.Value), []byte("_"), 2)
-			if len(parts) > 0 {
-				return string(parts[0])
+	for _, domain := range []string{
+		"https://www.goofish.com",
+		"https://h5api.m.goofish.com",
+	} {
+		u, _ := url.Parse(domain)
+		for _, c := range api.client.Jar.Cookies(u) {
+			if c.Name == "_m_h5_tk" {
+				parts := bytes.SplitN([]byte(c.Value), []byte("_"), 2)
+				if len(parts) > 0 {
+					return string(parts[0])
+				}
 			}
 		}
 	}
@@ -141,12 +199,8 @@ func (api *XianyuAPI) mtopParams(apiName, version string, extra map[string]strin
 
 // doMtopRequest 执行 mtop API 请求并返回解析后的 JSON。
 //
-// 内部流程:
-//  1. 构建签名 (sign = MD5(token + "&" + t + "&" + appKey + "&" + data))
-//  2. 设置签名到 URL 参数
-//  3. 发送 POST 请求
-//  4. 解析响应 JSON
-//  5. 合并响应中的新 Cookie
+// 与 Python 版 _fetch_im_token_from_api 对齐:
+// 手动设置 Cookie header（而非依赖 CookieJar），确保发送完整 Cookie。
 func (api *XianyuAPI) doMtopRequest(ctx context.Context, apiName, version, data string, extraParams url.Values) (map[string]any, error) {
 	params := api.mtopParams(apiName, version, nil)
 	for k, v := range extraParams {
@@ -174,11 +228,15 @@ func (api *XianyuAPI) doMtopRequest(ctx context.Context, apiName, version, data 
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Origin", "https://www.goofish.com")
 	req.Header.Set("Referer", "https://www.goofish.com/")
+	// 手动设置 Cookie header（与 Python 版一致，不依赖 CookieJar）
+	// CookieJar 可能不发送 HttpOnly 的 cookie2/sgcookie
+	req.Header.Set("Cookie", api.CookieString())
 
 	// 设置 URL 参数
 	req.URL.RawQuery = params.Encode()
 
-	resp, err := api.client.Do(req)
+	// 使用无 Jar 的 client 发送请求，避免 CookieJar 覆盖手动设置的 Cookie header
+	resp, err := api.noJarClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("apis: do request: %w", err)
 	}
@@ -190,4 +248,46 @@ func (api *XianyuAPI) doMtopRequest(ctx context.Context, apiName, version, data 
 	}
 
 	return result, nil
+}
+
+// RefreshMtopToken 刷新 _m_h5_tk Cookie。
+//
+// 通过调用一个简单的 mtop 接口触发服务端重新签发 _m_h5_tk。
+// 当验证码完成后，原有的 _m_h5_tk 可能已失效，需要刷新。
+func (api *XianyuAPI) RefreshMtopToken(ctx context.Context) {
+	// 使用空签名调用 mtop 接口，服务端会返回新的 _m_h5_tk
+	params := url.Values{
+		"jsv":           {jsv},
+		"appKey":        {appKey},
+		"t":             {fmt.Sprintf("%d", time.Now().UnixMilli())},
+		"sign":          {""},
+		"v":             {"1.0"},
+		"type":          {"originaljson"},
+		"dataType":      {dataType},
+		"timeout":       {mtopTimout},
+		"api":           {"mtop.taobao.idlehome.home.webpc.feed"},
+		"sessionOption": {sessionOpt},
+	}
+
+	reqURL := fmt.Sprintf("%s/h5/mtop.taobao.idlehome.home.webpc.feed/1.0/?%s", api.baseURL, params.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader([]byte("data=%7B%7D")))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", UA)
+	req.Header.Set("Origin", "https://www.goofish.com")
+	req.Header.Set("Referer", "https://www.goofish.com/")
+	req.Header.Set("Cookie", api.CookieString())
+
+	resp, err := api.noJarClient.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+
+	// 检查 _m_h5_tk 是否已更新
+	if newToken := api.tokenFromCookie(); newToken != "" {
+		api.logger.Info("mtop token refreshed", zap.String("token", newToken[:10]+"..."))
+	}
 }

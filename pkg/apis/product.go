@@ -359,6 +359,36 @@ func buildItemLabelExtList(channelResp map[string]any) []map[string]any {
 	return labels
 }
 
+// ConfirmShipping 自动确认发货。
+//
+// 与 Python 版 ConfirmShippingService.auto_confirm 对齐:
+// 调用 mtop.taobao.idle.logistic.consign.dummy API 确认订单发货。
+// 适用于虚拟商品自动发货场景，确认后买家款项将到账。
+//
+// 参数:
+//   - ctx:     请求上下文
+//   - orderID: 订单 ID
+//
+// 返回值:
+//   - map[string]any: 确认结果 JSON，成功时 ret 包含 "SUCCESS::调用成功"
+//   - error: 请求失败时的错误
+func (api *XianyuAPI) ConfirmShipping(ctx context.Context, orderID string) (map[string]any, error) {
+	// 构建请求数据（与 Python 版 data_val 格式一致）
+	dataVal := fmt.Sprintf(`{"orderId":"%s","tradeText":"","picList":[],"newUnconsign":true}`, orderID)
+
+	extra := map[string]string{
+		"spm_cnt": "a21ybx.im.0.0",
+	}
+
+	result, err := api.doMtopRequest(ctx,
+		"mtop.taobao.idle.logistic.consign.dummy", "1.0", dataVal, toValues(extra))
+	if err != nil {
+		return nil, fmt.Errorf("apis: confirm shipping: %w", err)
+	}
+
+	return result, nil
+}
+
 // toString 安全地将任意类型转为 string。
 func toString(v any) string {
 	if v == nil {

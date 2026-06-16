@@ -36,12 +36,18 @@ func BuildCookieString(cookies map[string]string) string {
 	return strings.Join(parts, "; ")
 }
 
-// GetCookieFromJar 从 *cookiejar.Jar 中查找指定域名和名称的 Cookie 值。
+// GetCookieFromJar 从 CookieJar 中查找指定域名和名称的 Cookie 值。
 //
-// 注意: 需要传入具体的 *cookiejar.Jar（而非 http.CookieJar 接口），
-// 因为标准库的 CookieJar 接口不暴露遍历方法。
+// 重要: Go 的 cookiejar 遵循 RFC 6265，不接受以点开头的域名（如 .goofish.com）
+// 作为 URL 主机名。必须使用合法主机名（如 www.goofish.com）查询。
+// Domain 字段为 .goofish.com 的 Cookie 可以被 www.goofish.com 查询到。
 func GetCookieFromJar(jar http.CookieJar, domain, name string) string {
-	u, _ := url.Parse("https://" + domain)
+	// 将 .goofish.com 转换为 www.goofish.com 用于查询
+	host := domain
+	if strings.HasPrefix(host, ".") {
+		host = "www" + host
+	}
+	u, _ := url.Parse("https://" + host)
 	for _, c := range jar.Cookies(u) {
 		if c.Name == name {
 			return c.Value
@@ -51,12 +57,20 @@ func GetCookieFromJar(jar http.CookieJar, domain, name string) string {
 }
 
 // SetCookieToJar 向 CookieJar 中写入指定 Cookie。
+//
+// 重要: Go 的 cookiejar 遵循 RFC 6265，不接受以点开头的域名作为 URL 主机名。
+// 但 Domain 字段可以设置为 .goofish.com，这样所有子域都能访问该 Cookie。
 func SetCookieToJar(jar http.CookieJar, domain, name, value, path string) {
-	u, _ := url.Parse("https://" + domain)
+	// 将 .goofish.com 转换为 www.goofish.com 用于设置
+	host := domain
+	if strings.HasPrefix(host, ".") {
+		host = "www" + host
+	}
+	u, _ := url.Parse("https://" + host)
 	cookie := &http.Cookie{
 		Name:   name,
 		Value:  value,
-		Domain: domain,
+		Domain: domain, // 保持原始 domain（如 .goofish.com），使所有子域可访问
 		Path:   path,
 	}
 	jar.SetCookies(u, []*http.Cookie{cookie})

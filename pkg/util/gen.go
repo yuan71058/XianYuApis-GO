@@ -1,7 +1,6 @@
 package util
 
 import (
-	"crypto/rand"
 	"fmt"
 	mathrand "math/rand"
 	"time"
@@ -28,22 +27,28 @@ func GenerateUUID() string {
 
 // GenerateDeviceID 基于用户 unb 生成设备 ID。
 //
-// 格式: "RFC4122-v4-UUID-用户unb"
-// 使用 crypto/rand 确保随机性（原版 JS 使用 Math.random 可预测）。
+// 格式: "UUID-v4-格式-用户unb"
+// 与 Python 版 generate_device_id 对齐，使用与 Python 版相同的字符集。
 func GenerateDeviceID(userID string) string {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
-	if err != nil {
-		// 回退到 time-based: 理论上不会发生
-		return fmt.Sprintf("fallback-%s", userID)
+	chars := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	result := make([]byte, 36+1+len(userID))
+
+	for i := 0; i < 36; i++ {
+		switch {
+		case i == 8 || i == 13 || i == 18 || i == 23:
+			result[i] = '-'
+		case i == 14:
+			result[i] = '4' // UUID v4
+		case i == 19:
+			randVal := mathrand.Intn(16)
+			result[i] = chars[(randVal&0x3)|0x8]
+		default:
+			randVal := mathrand.Intn(len(chars))
+			result[i] = chars[randVal]
+		}
 	}
 
-	// 构造 RFC 4122 v4 UUID 格式
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 10xx
-
-	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x-%s",
-		b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-		b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
-		userID)
+	result[36] = '-'
+	copy(result[37:], userID)
+	return string(result)
 }

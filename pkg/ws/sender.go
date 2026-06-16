@@ -66,5 +66,7 @@ func (ws *XianyuWS) sendEncodedMessage(ctx context.Context, cid, toID string,
 	}
 
 	msgData, _ := json.Marshal(lwpMsg)
+	ws.writeMu.Lock()
+	defer ws.writeMu.Unlock()
 	return ws.ws.Write(ctx, websocket.MessageText, msgData)
 }

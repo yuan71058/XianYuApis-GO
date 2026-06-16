@@ -3,6 +3,7 @@ package apis
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -11,7 +12,8 @@ import (
 // GetToken 获取 WebSocket 连接所需的 accessToken。
 //
 // 该接口对应闲鱼 mtop.taobao.idlemessage.pc.login.token API。
-// 如果返回令牌过期，会自动重试最多 3 次（循环重试，非递归，避免栈溢出）。
+// 如果返回令牌过期，会自动重试最多 3 次。
+// 如果触发风控验证码（RGV587_ERROR::SM），会等待冷却后重试。
 //
 // 返回值:
 //   - string: accessToken，用于 WebSocket /reg 注册
@@ -31,6 +33,24 @@ func (api *XianyuAPI) GetToken(ctx context.Context) (string, error) {
 			"mtop.taobao.idlemessage.pc.login.token", "1.0", dataVal, toValues(extra))
 		if err != nil {
 			lastErr = err
+			api.logger.Warn("get token request failed, retrying", zap.Int("retry", retry+1), zap.Error(err))
+			time.Sleep(time.Duration(retry+1) * time.Second)
+			continue
+		}
+
+		// 检查是否触发风控验证码
+		if isCaptchaResponse(result) {
+			api.logger.Warn("触发风控验证码，等待冷却后重试",
+				zap.Int("retry", retry+1),
+			)
+			// 风控验证码需要重新登录获取新 Cookie
+			// 等待 30 秒冷却后重试
+			cooldown := 30 * time.Second
+			fmt.Printf("\n  [风控] 触发验证码拦截，等待 %v 后重试 (%d/3)...\n", cooldown, retry+1)
+			time.Sleep(cooldown)
+
+			// 刷新 _m_h5_tk
+			api.RefreshMtopToken(ctx)
 			continue
 		}
 
@@ -53,7 +73,22 @@ func (api *XianyuAPI) GetToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("apis: token not found in response: %v", result)
 	}
 
-	return "", fmt.Errorf("apis: get token failed after 3 retries: %w", lastErr)
+	return "", fmt.Errorf("apis: get token failed after 3 retries (可能触发风控，请稍后重新运行): %w", lastErr)
+}
+
+// isCaptchaResponse 检查 mtop 响应是否为风控验证码拦截。
+func isCaptchaResponse(result map[string]any) bool {
+	ret, _ := result["ret"].([]any)
+	for _, r := range ret {
+		if s, ok := r.(string); ok {
+			sUpper := strings.ToUpper(s)
+			if strings.Contains(sUpper, "FAIL_SYS_USER_VALIDATE") ||
+				strings.Contains(sUpper, "RGV587_ERROR") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RefreshToken 刷新登录态。

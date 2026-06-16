@@ -1,8 +1,10 @@
-// Package ws 封装闲鱼 WebSocket 实时通信，包括连接管理、消息收发、心跳保活等。
+// Package ws 封装闲鱼 WebSocket 实时通信。
 package ws
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"sync"
 
 	"github.com/cv-cat/xianyuapis/pkg/apis"
@@ -12,38 +14,45 @@ import (
 )
 
 // MessageHandler 消息处理回调函数类型。
-// 当收到闲鱼用户消息时，该函数被调用。
 type MessageHandler func(m *msg.Message)
 
 // XianyuWS 闲鱼 WebSocket 客户端。
 //
-// 该结构体管理闲鱼 WebSocket 长连接，负责:
-//   - 连接建立和初始化（Token 获取、注册、状态同步）
-//   - 心跳保活（每 15 秒发送心跳包）
-//   - 消息接收和处理
-//   - Token 自动刷新（每 10 分钟）
+// 与 Python 版 im_client.py GoofishImClient 对齐:
+//   - 使用 nhooyr.io/websocket（支持 permessage-deflate 压缩，与 Python aiohttp 对齐）
+//   - Connect: 建立 WebSocket + 启动 recvLoop + send-and-wait /reg + 启动心跳
+//   - Start: 等待连接关闭
 type XianyuWS struct {
-	api      *apis.XianyuAPI    // HTTP API 实例
-	ws       *websocket.Conn    // WebSocket 连接
-	myID     string             // 当前用户 unb
-	deviceID string             // 设备 ID
-	ctx      context.Context    // 控制上下文
-	cancel   context.CancelFunc // 取消函数
+	api      *apis.XianyuAPI       // HTTP API 实例
+	ws       *websocket.Conn       // WebSocket 连接 (nhooyr.io/websocket)
+	myID     string                // 当前用户 unb
+	deviceID string                // 设备 ID
+	ctx      context.Context       // 控制上下文
+	cancel   context.CancelFunc    // 取消函数
 
 	mu         sync.RWMutex   // 保护 msgHandler
 	msgHandler MessageHandler // 消息处理回调
 	logger     *zap.Logger    // 日志
+
+	writeMu sync.Mutex // nhooyr.io/websocket 不支持并发写
+
+	recvErrCh chan error // recvLoop 错误传播
+
+	// 请求-响应配对（与 Python 版 _pending 对齐）
+	pendingMu sync.Mutex
+	pending   map[string]chan map[string]any // mid -> response channel
+}
+
+// parseURL 解析 URL 字符串。
+func parseURL(raw string) *url.URL {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }
 
 // New 创建 WebSocket 客户端。
-//
-// 参数:
-//   - cookies:  登录后的 Cookie 字典，必须包含 "unb" 字段
-//   - deviceID: 可选的设备 ID，为空时自动从 unb 生成
-//
-// 返回值:
-//   - *XianyuWS: 初始化的 WebSocket 客户端实例
-//   - error: 创建失败时的错误
 func New(cookies map[string]string, deviceID string) (*XianyuWS, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	api, err := apis.New(cookies, deviceID)
@@ -53,39 +62,74 @@ func New(cookies map[string]string, deviceID string) (*XianyuWS, error) {
 	}
 
 	return &XianyuWS{
-		api:      api,
-		myID:     cookies["unb"],
-		deviceID: api.DeviceID(),
-		ctx:      ctx,
-		cancel:   cancel,
-		logger:   zap.L(),
+		api:       api,
+		myID:      cookies["unb"],
+		deviceID:  api.DeviceID(),
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    zap.L(),
+		recvErrCh: make(chan error, 1),
+		pending:   make(map[string]chan map[string]any),
+	}, nil
+}
+
+// NewWithAPI 使用已有的 API 实例创建 WebSocket 客户端（推荐）。
+func NewWithAPI(api *apis.XianyuAPI) (*XianyuWS, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var myID string
+	for _, domain := range []string{
+		"https://www.goofish.com",
+		"https://goofish.com",
+	} {
+		u := parseURL(domain)
+		for _, c := range api.Client().Jar.Cookies(u) {
+			if c.Name == "unb" {
+				myID = c.Value
+				break
+			}
+		}
+		if myID != "" {
+			break
+		}
+	}
+
+	if myID == "" {
+		cancel()
+		return nil, fmt.Errorf("ws: 'unb' cookie not found")
+	}
+
+	return &XianyuWS{
+		api:       api,
+		myID:      myID,
+		deviceID:  api.DeviceID(),
+		ctx:       ctx,
+		cancel:    cancel,
+		logger:    zap.L(),
+		recvErrCh: make(chan error, 1),
+		pending:   make(map[string]chan map[string]any),
 	}, nil
 }
 
 // SetMessageHandler 设置消息处理回调。
-//
-// 该回调在收到用户消息时被调用。回调函数应在合理时间内返回，
-// 长时间阻塞会影响后续消息的处理。如需耗时处理，请在回调内启动 goroutine。
 func (ws *XianyuWS) SetMessageHandler(h MessageHandler) {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 	ws.msgHandler = h
 }
 
-// DeviceID 返回当前客户端的设备 ID。
-func (ws *XianyuWS) DeviceID() string {
-	return ws.deviceID
-}
+// DeviceID 返回设备 ID。
+func (ws *XianyuWS) DeviceID() string { return ws.deviceID }
 
-// MyID 返回当前用户的 unb ID。
-func (ws *XianyuWS) MyID() string {
-	return ws.myID
-}
+// MyID 返回当前用户 unb ID。
+func (ws *XianyuWS) MyID() string { return ws.myID }
 
 // Stop 停止 WebSocket 客户端。
 func (ws *XianyuWS) Stop() {
-	ws.cancel()
+	// 先关闭 WebSocket 连接，使 recvLoop 中的 Read 立即返回
 	if ws.ws != nil {
 		ws.ws.Close(websocket.StatusNormalClosure, "client stop")
 	}
+	// 再取消 context，停止其他 goroutine
+	ws.cancel()
 }

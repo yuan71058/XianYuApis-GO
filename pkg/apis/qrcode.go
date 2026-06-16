@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cv-cat/xianyuapis/pkg/model"
@@ -156,8 +158,8 @@ func generateQRCode(client *http.Client, csrfToken, cookie2 string) (*model.QRCo
 		Content struct {
 			Data struct {
 				CodeContent string `json:"codeContent"`
-				T           string `json:"t"`
-				Ck          string `json:"ck"`
+				T           any    `json:"t"`
+				Ck          any    `json:"ck"`
 			} `json:"data"`
 		} `json:"content"`
 	}
@@ -167,8 +169,8 @@ func generateQRCode(client *http.Client, csrfToken, cookie2 string) (*model.QRCo
 
 	return &model.QRCodeData{
 		CodeContent: result.Content.Data.CodeContent,
-		T:           result.Content.Data.T,
-		Ck:          result.Content.Data.Ck,
+		T:           anyToString(result.Content.Data.T),
+		Ck:          anyToString(result.Content.Data.Ck),
 	}, nil
 }
 
@@ -310,11 +312,20 @@ func refreshMtopCookies(client *http.Client) {
 }
 
 // extractGoofishCookies 从 CookieJar 中提取 .goofish.com 域下的所有 Cookie。
+//
+// 重要: Go 的 cookiejar 遵循 RFC 6265，不接受以点开头的域名（如 .goofish.com）
+// 作为 URL 主机名。必须使用合法主机名（如 www.goofish.com）查询。
+// Domain 字段为 .goofish.com 的 Cookie 可以被 www.goofish.com 查询到。
 func extractGoofishCookies(client *http.Client) map[string]string {
 	cookies := make(map[string]string)
 	if jar, ok := client.Jar.(*cookiejar.Jar); ok {
 		for _, domain := range []string{".goofish.com", ".mmstat.com"} {
-			u, _ := url.Parse("https://" + domain)
+			// 将 .goofish.com 转换为 www.goofish.com 用于查询
+			host := domain
+			if strings.HasPrefix(host, ".") {
+				host = "www" + host
+			}
+			u, _ := url.Parse("https://" + host)
 			for _, c := range jar.Cookies(u) {
 				cookies[c.Name] = c.Value
 			}
@@ -323,13 +334,24 @@ func extractGoofishCookies(client *http.Client) map[string]string {
 	return cookies
 }
 
-// printQR 在终端使用 Unicode 块字符打印二维码。
+// printQR 在终端打印二维码，并保存为 PNG 图片文件。
 func printQR(data string) {
 	qr, err := qrcode.New(data, qrcode.Medium)
 	if err != nil {
 		fmt.Printf("[qrcode] generate failed: %v\n", err)
 		return
 	}
+
+	// 保存为 PNG 图片文件，方便无法看清终端二维码的用户
+	pngPath := "qrcode.png"
+	if err := qr.WriteFile(256, pngPath); err != nil {
+		fmt.Printf("[qrcode] save png failed: %v\n", err)
+	} else {
+		absPath, _ := absPath(pngPath)
+		fmt.Printf("[qrcode] 二维码已保存到: %s\n", absPath)
+		fmt.Printf("[qrcode] 请用闲鱼 APP 扫描该图片，或直接打开上面的 URL\n")
+	}
+
 	// 使用半块字符 (▀▄█) 绘制接近正方形的二维码
 	matrix := qr.Bitmap()
 	rows := len(matrix)
@@ -357,4 +379,28 @@ func printQR(data string) {
 		}
 		fmt.Println(line)
 	}
+}
+
+// anyToString 将 any 类型安全转为 string（兼容 string 和 float64 两种 JSON 类型）。
+func anyToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch s := v.(type) {
+	case string:
+		return s
+	case float64:
+		return fmt.Sprintf("%.0f", s)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+// absPath 返回文件的绝对路径。
+func absPath(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return p, err
+	}
+	return abs, nil
 }
