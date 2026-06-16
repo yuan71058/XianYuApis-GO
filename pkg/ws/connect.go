@@ -159,6 +159,12 @@ func (ws *XianyuWS) ConnectWithToken(ctx context.Context, token string) error {
 
 	ws.logger.Info("ws: connected and initialized")
 	fmt.Println("[WS] 连接初始化完成，开始监听消息")
+
+	// 标记连接存活
+	ws.mu.Lock()
+	ws.connected = true
+	ws.mu.Unlock()
+
 	return nil
 }
 

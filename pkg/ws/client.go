@@ -30,8 +30,9 @@ type XianyuWS struct {
 	ctx      context.Context       // 控制上下文
 	cancel   context.CancelFunc    // 取消函数
 
-	mu         sync.RWMutex   // 保护 msgHandler
+	mu         sync.RWMutex   // 保护 msgHandler 和 connected
 	msgHandler MessageHandler // 消息处理回调
+	connected  bool           // WebSocket 连接是否存活
 	logger     *zap.Logger    // 日志
 
 	writeMu sync.Mutex // nhooyr.io/websocket 不支持并发写
@@ -124,8 +125,25 @@ func (ws *XianyuWS) DeviceID() string { return ws.deviceID }
 // MyID 返回当前用户 unb ID。
 func (ws *XianyuWS) MyID() string { return ws.myID }
 
+// IsAlive 返回 WebSocket 连接是否存活。
+//
+// 与 Python 版 user_alive() 对齐:
+// Python 版 user_alive() 是后台线程，每 600 秒刷新 Token 保持连接存活。
+// Go 版本通过 StartTokenRefresher() 实现相同功能（每 10 分钟刷新），
+// IsAlive() 提供连接状态查询，可用于判断是否需要重连。
+func (ws *XianyuWS) IsAlive() bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return ws.connected && ws.ctx.Err() == nil
+}
+
 // Stop 停止 WebSocket 客户端。
 func (ws *XianyuWS) Stop() {
+	// 标记连接已断开
+	ws.mu.Lock()
+	ws.connected = false
+	ws.mu.Unlock()
+
 	// 先关闭 WebSocket 连接，使 recvLoop 中的 Read 立即返回
 	if ws.ws != nil {
 		ws.ws.Close(websocket.StatusNormalClosure, "client stop")

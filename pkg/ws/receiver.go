@@ -45,6 +45,10 @@ func (ws *XianyuWS) recvLoop() {
 			case ws.recvErrCh <- fmt.Errorf("ws: read: %w", err):
 			default:
 			}
+			// 标记连接断开
+			ws.mu.Lock()
+			ws.connected = false
+			ws.mu.Unlock()
 			return
 		}
 		msgCount++
