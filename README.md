@@ -4,7 +4,7 @@
 
 **闲鱼 API Go 语言实现**
 
-从 [XianYuApis (Python)](https://github.com/cv-cat/XianYuApis) 迁移而来 · 参考 [xianyu-auto-reply](https://github.com/zhinianboke/xianyu-auto-reply) 修复消息解析
+从 [XianYuApis (Python)](https://github.com/cv-cat/XianYuApis) 迁移而来 
 
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
