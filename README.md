@@ -187,8 +187,9 @@ wsClient.SetMessageHandler(func(m *msg.Message) {
     }
 })
 
-// 启动 Token 自动刷新（每 10 分钟）
+// 启动 Token 自动刷新（默认 10 分钟，可自定义间隔）
 wsClient.StartTokenRefresher()
+wsClient.StartTokenRefresher(5 * time.Minute) // 自定义 5 分钟
 
 // 建立连接（支持手动传入 Token）
 wsClient.ConnectWithToken(ctx, accessToken)

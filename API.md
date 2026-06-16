@@ -390,10 +390,23 @@ func (ws *XianyuWS) SetMessageHandler(h MessageHandler)
 ### StartTokenRefresher
 
 ```go
-func (ws *XianyuWS) StartTokenRefresher()
+func (ws *XianyuWS) StartTokenRefresher(interval ...time.Duration)
 ```
 
-启动后台 Token 刷新 goroutine，每 10 分钟自动刷新一次。与 Python 版 `user_alive()` 对齐。
+启动后台 Token 刷新 goroutine。与 Python 版 `user_alive()` 对齐。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| interval | `...time.Duration` | 可选，刷新间隔。0 或不传使用默认值 10 分钟 |
+
+**示例**:
+```go
+// 默认 10 分钟刷新
+wsClient.StartTokenRefresher()
+
+// 自定义 5 分钟刷新
+wsClient.StartTokenRefresher(5 * time.Minute)
+```
 
 ---
 

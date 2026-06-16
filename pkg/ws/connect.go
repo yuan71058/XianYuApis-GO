@@ -245,9 +245,19 @@ func (ws *XianyuWS) heartbeat() {
 }
 
 // StartTokenRefresher 启动后台 Token 刷新 goroutine。
-func (ws *XianyuWS) StartTokenRefresher() {
+//
+// 与 Python 版 user_alive() 对齐:
+// Python 版每 600 秒刷新 Token，Go 版本默认 10 分钟，可由用户自定义。
+//
+// 参数:
+//   - interval: 刷新间隔，0 使用默认值 10 分钟
+func (ws *XianyuWS) StartTokenRefresher(interval ...time.Duration) {
+	d := tokenRefreshInterval
+	if len(interval) > 0 && interval[0] > 0 {
+		d = interval[0]
+	}
 	go func() {
-		ticker := time.NewTicker(tokenRefreshInterval)
+		ticker := time.NewTicker(d)
 		defer ticker.Stop()
 		for {
 			select {
