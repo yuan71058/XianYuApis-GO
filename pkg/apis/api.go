@@ -26,6 +26,19 @@ const (
 	sessionOpt = "AutoLoginOnly"
 )
 
+// CaptchaHandler 风控验证码处理回调。
+//
+// 当 mtop 接口返回 FAIL_SYS_USER_VALIDATE / RGV587_ERROR 时调用，
+// 传入从响应中提取的验证链接（verifyURL）。
+//
+// 实现者应在浏览器中打开 verifyURL 让用户完成验证，
+// 验证完成后返回新的 Cookie 字符串（从浏览器复制）。
+//
+// 返回值:
+//   - string: 验证后的新 Cookie 字符串（如 "unb=xxx; _m_h5_tk=xxx; ..."）
+//   - error: 如果无法处理或用户取消，返回 error 终止重试
+type CaptchaHandler func(verifyURL string) (newCookieStr string, err error)
+
 // XianyuAPI 闲鱼 HTTP API 封装。
 //
 // 该结构体封装了所有闲鱼 HTTP 接口，包括 sign 签名、请求构建、
@@ -33,13 +46,14 @@ const (
 //
 // 线程安全: 同一 XianyuAPI 实例可被多个 goroutine 并发调用。
 type XianyuAPI struct {
-	client       *http.Client // 带 CookieJar 的 HTTP 客户端（用于 Cookie 管理）
-	noJarClient  *http.Client // 无 Jar 的 HTTP 客户端（用于发送请求，Cookie 手动设置）
-	deviceID     string       // 设备 ID
-	baseURL      string       // mtop 基础地址
-	uploadURL    string       // 媒体上传地址
-	passportURL  string       // 通行证地址
-	logger       *zap.Logger  // 日志记录器
+	client         *http.Client   // 带 CookieJar 的 HTTP 客户端（用于 Cookie 管理）
+	noJarClient    *http.Client   // 无 Jar 的 HTTP 客户端（用于发送请求，Cookie 手动设置）
+	deviceID       string         // 设备 ID
+	baseURL        string         // mtop 基础地址
+	uploadURL      string         // 媒体上传地址
+	passportURL    string         // 通行证地址
+	logger         *zap.Logger    // 日志记录器
+	captchaHandler CaptchaHandler // 风控验证码处理回调（可选）
 }
 
 // New 创建闲鱼 API 实例。
@@ -323,4 +337,39 @@ func (api *XianyuAPI) NoJarClient() *http.Client {
 //   - error: 错误信息
 func (api *XianyuAPI) DoMtopRequest(ctx context.Context, apiName, version, data string, extraParams url.Values) (map[string]any, error) {
 	return api.doMtopRequest(ctx, apiName, version, data, extraParams)
+}
+
+// SetCaptchaHandler 设置风控验证码处理回调。
+//
+// 设置后，当 mtop 接口返回风控验证码（FAIL_SYS_USER_VALIDATE / RGV587_ERROR）时，
+// 会调用 handler 传入验证链接，由 handler 引导用户完成验证并返回新 Cookie。
+//
+// 如果不设置，默认行为是等待 30 秒冷却后重试（可能仍然失败）。
+//
+// 参数:
+//   - handler: 验证码处理回调函数
+func (api *XianyuAPI) SetCaptchaHandler(handler CaptchaHandler) {
+	api.captchaHandler = handler
+}
+
+// UpdateCookies 更新 CookieJar 中的 Cookie。
+//
+// 当用户在浏览器中完成风控验证后，浏览器的 Cookie 会更新，
+// 需要调用此方法将新 Cookie 同步到 API 实例。
+//
+// 参数:
+//   - cookies: 新的 Cookie 字典
+func (api *XianyuAPI) UpdateCookies(cookies map[string]string) {
+	u, _ := url.Parse("https://www.goofish.com")
+	for name, value := range cookies {
+		cookie := &http.Cookie{
+			Name:     name,
+			Value:    value,
+			Domain:   ".goofish.com",
+			Path:     "/",
+			HttpOnly: false,
+		}
+		api.client.Jar.SetCookies(u, []*http.Cookie{cookie})
+	}
+	api.logger.Info("cookies updated", zap.Int("count", len(cookies)))
 }

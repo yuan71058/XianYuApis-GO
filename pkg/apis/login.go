@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cv-cat/xianyuapis/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -13,7 +14,9 @@ import (
 //
 // 该接口对应闲鱼 mtop.taobao.idlemessage.pc.login.token API。
 // 如果返回令牌过期，会自动重试最多 3 次。
-// 如果触发风控验证码（RGV587_ERROR::SM），会等待冷却后重试。
+// 如果触发风控验证码（RGV587_ERROR::SM），会尝试调用验证码处理回调：
+//   - 若设置了 CaptchaHandler，提取验证链接交给用户验证，验证后更新 Cookie 重试
+//   - 若未设置 CaptchaHandler，等待 30 秒冷却后重试
 //
 // 返回值:
 //   - string: accessToken，用于 WebSocket /reg 注册
@@ -40,13 +43,37 @@ func (api *XianyuAPI) GetToken(ctx context.Context) (string, error) {
 
 		// 检查是否触发风控验证码
 		if isCaptchaResponse(result) {
-			api.logger.Warn("触发风控验证码，等待冷却后重试",
+			verifyURL := extractVerifyURL(result)
+			api.logger.Warn("触发风控验证码",
 				zap.Int("retry", retry+1),
+				zap.String("verifyURL", verifyURL),
 			)
-			// 风控验证码需要重新登录获取新 Cookie
-			// 等待 30 秒冷却后重试
+
+			// 如果设置了验证码处理回调，调用它
+			if api.captchaHandler != nil && verifyURL != "" {
+				fmt.Printf("\n  [风控] 触发验证码拦截，已提取验证链接 (%d/3)\n", retry+1)
+				newCookieStr, err := api.captchaHandler(verifyURL)
+				if err != nil {
+					lastErr = fmt.Errorf("验证码处理失败: %w", err)
+					fmt.Printf("  [风控] 验证码处理失败: %v\n", err)
+					continue
+				}
+				if newCookieStr != "" {
+					// 更新 Cookie
+					api.UpdateCookies(util.ParseCookies(newCookieStr))
+					// 刷新 _m_h5_tk
+					api.RefreshMtopToken(ctx)
+					fmt.Printf("  [风控] Cookie 已更新，重试中...\n")
+					continue
+				}
+			}
+
+			// 默认行为：等待冷却后重试
 			cooldown := 30 * time.Second
 			fmt.Printf("\n  [风控] 触发验证码拦截，等待 %v 后重试 (%d/3)...\n", cooldown, retry+1)
+			if verifyURL != "" {
+				fmt.Printf("  [风控] 验证链接（可手动在浏览器中打开）: %s\n", verifyURL)
+			}
 			time.Sleep(cooldown)
 
 			// 刷新 _m_h5_tk
@@ -89,6 +116,36 @@ func isCaptchaResponse(result map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// extractVerifyURL 从风控响应中提取验证链接。
+//
+// 淘宝/闲鱼 mtop 风控响应格式:
+//
+//	{
+//	  "ret": ["FAIL_SYS_USER_VALIDATE", "RGV587_ERROR::SM::..."],
+//	  "data": {"url": "https://h5api.m.taobao.com/h5/mtop.../..."}
+//	}
+//
+// 验证链接通常在 data.url 字段中。
+func extractVerifyURL(result map[string]any) string {
+	// 尝试 data.url
+	if data, ok := result["data"].(map[string]any); ok {
+		if url, ok := data["url"].(string); ok && url != "" {
+			return url
+		}
+		// 尝试 data.data.url（嵌套结构）
+		if innerData, ok := data["data"].(map[string]any); ok {
+			if url, ok := innerData["url"].(string); ok && url != "" {
+				return url
+			}
+		}
+	}
+	// 尝试 url（顶层）
+	if url, ok := result["url"].(string); ok && url != "" {
+		return url
+	}
+	return ""
 }
 
 // RefreshToken 刷新登录态。
