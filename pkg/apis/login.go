@@ -27,12 +27,10 @@ func (api *XianyuAPI) GetToken(ctx context.Context) (string, error) {
 		"log_id":  "14ad3da6ALVq3n",
 	}
 
-	var lastErr error
 	for retry := 0; retry < 3; retry++ {
 		result, err := api.doMtopRequest(ctx,
 			"mtop.taobao.idlemessage.pc.login.token", "1.0", dataVal, toValues(extra))
 		if err != nil {
-			lastErr = err
 			api.logger.Warn("get token request failed, retrying", zap.Int("retry", retry+1), zap.Error(err))
 			time.Sleep(time.Duration(retry+1) * time.Second)
 			continue
@@ -47,6 +45,7 @@ func (api *XianyuAPI) GetToken(ctx context.Context) (string, error) {
 			// 等待 30 秒冷却后重试
 			cooldown := 30 * time.Second
 			fmt.Printf("\n  [风控] 触发验证码拦截，等待 %v 后重试 (%d/3)...\n", cooldown, retry+1)
+			fmt.Println("  [提示] 请重新扫码登录以获取新的 Cookie 和 Token")
 			time.Sleep(cooldown)
 
 			// 刷新 _m_h5_tk
@@ -73,7 +72,7 @@ func (api *XianyuAPI) GetToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("apis: token not found in response: %v", result)
 	}
 
-	return "", fmt.Errorf("apis: get token failed after 3 retries (可能触发风控，请稍后重新运行): %w", lastErr)
+	return "", fmt.Errorf("获取 WS Token 失败（3 次重试后）：可能触发风控验证，请重新扫码登录获取新的 Cookie 和 Token")
 }
 
 // isCaptchaResponse 检查 mtop 响应是否为风控验证码拦截。
