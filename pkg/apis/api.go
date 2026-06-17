@@ -219,6 +219,8 @@ func (api *XianyuAPI) doMtopRequest(ctx context.Context, apiName, version, data 
 
 	// 构建请求体
 	body := url.Values{"data": {data}}
+	// 调试日志：记录 mtop 请求的 API 名称和 data 参数（便于排查 FAIL_BIZ_JSON_ERROR）
+	zap.L().Debug("doMtopRequest", zap.String("api", apiName), zap.String("version", version), zap.String("data", data))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewBufferString(body.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("apis: new request: %w", err)
@@ -246,6 +248,9 @@ func (api *XianyuAPI) doMtopRequest(ctx context.Context, apiName, version, data 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("apis: decode response: %w", err)
 	}
+	// 调试日志：记录 mtop 响应（便于排查发布失败原因）
+	resultJSON, _ := json.Marshal(result)
+	zap.L().Info("doMtopRequest response", zap.String("api", apiName), zap.String("response", string(resultJSON)))
 
 	return result, nil
 }
@@ -290,4 +295,32 @@ func (api *XianyuAPI) RefreshMtopToken(ctx context.Context) {
 	if newToken := api.tokenFromCookie(); newToken != "" {
 		api.logger.Info("mtop token refreshed", zap.String("token", newToken[:10]+"..."))
 	}
+}
+
+// TokenFromCookie 公开方法：从 CookieJar 中提取 _m_h5_tk 的 token 部分
+// 供扩展 API（ExtAPIs）使用，按 DESIGN.md 4.26 方案 A 导出
+func (api *XianyuAPI) TokenFromCookie() string {
+	return api.tokenFromCookie()
+}
+
+// NoJarClient 公开方法：返回无 CookieJar 的 HTTP 客户端
+// 供扩展 API（ExtAPIs）使用，按 DESIGN.md 4.26 方案 A 导出
+func (api *XianyuAPI) NoJarClient() *http.Client {
+	return api.noJarClient
+}
+
+// DoMtopRequest 公开方法：执行 mtop API 请求
+// 供扩展 API（ExtAPIs）使用，按 DESIGN.md 4.26 方案 A 导出
+// 参数：
+//   - ctx: 上下文
+//   - apiName: mtop API 名称（如 mtop.taobao.idle.item.polish）
+//   - version: API 版本（如 1.0）
+//   - data: 请求数据 JSON 字符串
+//   - extraParams: 额外的 URL 参数
+//
+// 返回值：
+//   - map[string]any: 解析后的 JSON 响应
+//   - error: 错误信息
+func (api *XianyuAPI) DoMtopRequest(ctx context.Context, apiName, version, data string, extraParams url.Values) (map[string]any, error) {
+	return api.doMtopRequest(ctx, apiName, version, data, extraParams)
 }

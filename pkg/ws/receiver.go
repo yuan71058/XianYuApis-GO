@@ -167,41 +167,54 @@ func (ws *XianyuWS) sendACK(rawMsg map[string]any) {
 //  3. 解析: 提取 msg["1"]["10"]["reminderContent"] 等字段
 //  4. 解码内容: 从 msg["1"]["6"]["3"]["1"] 中 base64 解码出文本/图片
 func (ws *XianyuWS) handleMessage(rawMsg map[string]any) {
+	// 调试日志：记录收到的原始推送消息
+	lwp, _ := rawMsg["lwp"].(string)
+	ws.logger.Debug("ws: handleMessage called", zap.String("lwp", lwp))
+
 	body, _ := rawMsg["body"].(map[string]any)
 	if body == nil {
+		ws.logger.Debug("ws: handleMessage skip - no body", zap.String("lwp", lwp))
 		return
 	}
 
 	syncPkg, _ := body["syncPushPackage"].(map[string]any)
 	if syncPkg == nil {
+		ws.logger.Debug("ws: handleMessage skip - no syncPushPackage", zap.String("lwp", lwp))
 		return
 	}
 	dataList, _ := syncPkg["data"].([]any)
 	if len(dataList) == 0 {
+		ws.logger.Debug("ws: handleMessage skip - empty dataList", zap.String("lwp", lwp))
 		return
 	}
 
-	for _, item := range dataList {
+	ws.logger.Info("ws: handleMessage processing", zap.Int("dataCount", len(dataList)))
+
+	for i, item := range dataList {
 		syncData, _ := item.(map[string]any)
 		if syncData == nil {
+			ws.logger.Debug("ws: handleMessage skip item - not map", zap.Int("index", i))
 			continue
 		}
 		dataStr, _ := syncData["data"].(string)
 		if dataStr == "" {
+			ws.logger.Debug("ws: handleMessage skip item - empty data", zap.Int("index", i))
 			continue
 		}
 
 		// 解密数据
 		decrypted, err := decryptPushData(dataStr)
 		if err != nil {
-			// chatType 系统提示和 msgpack 解密失败都是正常情况，静默跳过
+			// chatType 系统提示和 msgpack 解密失败都是正常情况，记录后跳过
+			ws.logger.Debug("ws: handleMessage decrypt failed", zap.Int("index", i), zap.Error(err))
 			continue
 		}
 
 		// 解析消息
 		message := ws.parsePushMessage(decrypted)
 		if message == nil {
-			// /s/para 在线状态、非聊天 /s/sync 等消息无法解析为聊天消息，静默跳过
+			// /s/para 在线状态、非聊天 /s/sync 等消息无法解析为聊天消息，记录后跳过
+			ws.logger.Debug("ws: handleMessage parsePushMessage returned nil", zap.Int("index", i))
 			continue
 		}
 
@@ -210,7 +223,14 @@ func (ws *XianyuWS) handleMessage(rawMsg map[string]any) {
 		handler := ws.msgHandler
 		ws.mu.RUnlock()
 		if handler != nil {
+			ws.logger.Info("ws: calling msgHandler",
+				zap.String("convID", message.ConversationID),
+				zap.String("senderName", message.SenderName),
+				zap.String("content", truncate(message.Content, 50)),
+			)
 			handler(message)
+		} else {
+			ws.logger.Warn("ws: msgHandler is nil, message dropped")
 		}
 	}
 }

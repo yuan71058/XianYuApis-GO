@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/cv-cat/xianyuapis/pkg/model"
 )
@@ -171,6 +173,7 @@ func buildImageInfos(images []model.ImageInfo) []map[string]any {
 }
 
 // buildPublishPayload 构建商品发布请求体。
+// 对齐 Python 版 goofish_apis.py public() 方法的 payload 格式
 func buildPublishPayload(desc string, images []model.ImageInfo,
 	price *model.Price, ds model.DeliverySettings,
 	channelResp, locResp map[string]any,
@@ -178,8 +181,8 @@ func buildPublishPayload(desc string, images []model.ImageInfo,
 	data := map[string]any{
 		"freebies":    false,
 		"itemTypeStr": "b",
-		"quantity":    "1",
-		"simpleItem":  "true",
+		"quantity":    "1",    // Python 版本为字符串 "1"
+		"simpleItem":  "true", // Python 版本为字符串 "true"
 		"imageInfoDOList": buildImageDOList(images),
 		"itemTextDTO": map[string]any{
 			"desc":              desc,
@@ -195,7 +198,7 @@ func buildPublishPayload(desc string, images []model.ImageInfo,
 		"itemAddrDTO":    buildAddrDTO(locResp),
 		"itemCatDTO":     buildCatDTO(channelResp),
 		"defaultPrice":   price == nil,
-		"uniqueCode":     "1775897582791680",
+		"uniqueCode":     fmt.Sprintf("%d", time.Now().UnixMilli()), // 动态生成，避免重复
 		"sourceId":       "pcMainPublish",
 		"bizcode":        "pcMainPublish",
 		"publishScene":   "pcMainPublish",
@@ -281,7 +284,7 @@ func buildAddrDTO(locResp map[string]any) map[string]any {
 		"area":       toString(addr["area"]),
 		"city":       toString(addr["city"]),
 		"divisionId": toString(addr["divisionId"]),
-		"gps":        fmt.Sprintf("%v,%v", addr["longitude"], addr["latitude"]),
+		"gps":        fmt.Sprintf("%s,%s", toString(addr["longitude"]), toString(addr["latitude"])),
 		"poiId":      toString(addr["poiId"]),
 		"poiName":    toString(addr["poi"]),
 		"prov":       toString(addr["prov"]),
@@ -307,7 +310,9 @@ func buildCatDTO(channelResp map[string]any) map[string]any {
 }
 
 // buildItemLabelExtList 从推荐标签结果中提取用户已选中的标签。
-// 对应原版 Python 中遍历 cardList → valuesList → isClicked 的逻辑。
+// 对齐 Python 版 goofish_apis.py public() 方法中的标签构建逻辑。
+// 修复：Python 版中 None 值字段仍会序列化为 null，但闲鱼可能不接受 null，
+// 改为省略这些字段（与浏览器实际抓包一致）
 func buildItemLabelExtList(channelResp map[string]any) []map[string]any {
 	labels := []map[string]any{}
 	data, _ := channelResp["data"].(map[string]any)
@@ -333,25 +338,20 @@ func buildItemLabelExtList(channelResp map[string]any) []map[string]any {
 		for _, cv := range valuesList {
 			cvMap, _ := cv.(map[string]any)
 			if clicked, ok := cvMap["isClicked"].(bool); ok && clicked {
-				labels = append(labels, map[string]any{
+				label := map[string]any{
 					"channelCateName": cvMap["catName"],
-					"valueId":         nil,
 					"channelCatId":    cvMap["channelCatId"],
-					"valueName":       nil,
 					"tbCatId":         cvMap["tbCatId"],
-					"subPropertyId":   nil,
 					"labelType":       "common",
-					"subValueId":      nil,
-					"labelId":         nil,
 					"propertyName":    propName,
 					"isUserClick":     "1",
-					"isUserCancel":    nil,
 					"from":            "newPublishChoice",
 					"propertyId":      propID,
 					"labelFrom":       "newPublish",
 					"text":            cvMap["catName"],
 					"properties":      fmt.Sprintf("%s##%s:%s##%s", propID, propName, cvMap["channelCatId"], cvMap["catName"]),
-				})
+				}
+				labels = append(labels, label)
 				break
 			}
 		}
@@ -389,7 +389,9 @@ func (api *XianyuAPI) ConfirmShipping(ctx context.Context, orderID string) (map[
 	return result, nil
 }
 
-// toString 安全地将任意类型转为 string。
+// toString 将任意值转为字符串。
+// 修复：float64 使用 strconv.FormatFloat 避免大数字产生科学计数法
+// 例如 catId=50014803，%g 会输出 "5.00148e+07"，而 'f' 格式输出 "50014803"
 func toString(v any) string {
 	if v == nil {
 		return ""
@@ -398,7 +400,7 @@ func toString(v any) string {
 	case string:
 		return s
 	case float64:
-		return fmt.Sprintf("%g", s)
+		return strconv.FormatFloat(s, 'f', -1, 64)
 	default:
 		return fmt.Sprintf("%v", s)
 	}

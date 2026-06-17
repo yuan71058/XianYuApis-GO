@@ -69,8 +69,13 @@ func (api *XianyuAPI) UploadMedia(ctx context.Context, filePath string) (*Upload
 	req.Header.Set("User-Agent", UA)
 	req.Header.Set("Origin", "https://www.goofish.com")
 	req.Header.Set("Referer", "https://www.goofish.com/")
+	// 手动设置 Cookie header（与 doMtopRequest 一致，不依赖 CookieJar）
+	// 修复：使用 api.client（带 CookieJar）时，Cookie 可能不会发送到 stream-upload.goofish.com
+	// 因为 CookieJar 中 Cookie 的 Domain 是 .goofish.com，但上传 URL 是 stream-upload.goofish.com
+	req.Header.Set("Cookie", api.CookieString())
 
-	resp, err := api.client.Do(req)
+	// 使用无 Jar 的 client 发送请求，避免 CookieJar 覆盖手动设置的 Cookie header
+	resp, err := api.noJarClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("apis: do upload request: %w", err)
 	}
