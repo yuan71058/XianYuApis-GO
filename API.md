@@ -1533,3 +1533,355 @@ if ret, ok := result["ret"].([]any); ok && len(ret) > 0 {
     }
 }
 ```
+
+---
+
+## open — 闲鱼开放平台 API SDK
+
+`import "github.com/cv-cat/xianyuapis/pkg/open"`
+
+> 源自 [XIE7654/goofish_api](https://github.com/XIE7654/goofish_api)，基于 app_key + app_secret 鉴权。
+> 与 `pkg/apis`（逆向 API，Cookie 鉴权）互补，适用于商家商品/订单管理。
+
+### Client 结构体
+
+闲鱼开放平台客户端，封装签名计算、请求构建、响应解析。
+
+```go
+type Client struct {
+    User  *UserService
+    Good  *GoodService
+    Order *OrderService
+    Other *OtherService
+}
+```
+
+**内部机制**:
+- 签名算法: `MD5(app_key + "," + body_md5 + "," + timestamp + "," + [seller_id + ","] + app_secret)`
+- 时间戳: 秒级
+- JSON 序列化: 紧凑格式（无空格），否则签名不匹配
+- 自动移除 nil 字段（递归，含 nil 指针检测）
+
+**线程安全**: 同一 Client 实例可被多个 goroutine 并发调用。
+
+---
+
+### NewClient
+
+```go
+func NewClient(appKey, appSecret string, opts ...Option) *Client
+```
+
+创建开放平台客户端。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| appKey | `string` | 应用 Key（开放平台申请） |
+| appSecret | `string` | 应用 Secret |
+| opts | `...Option` | 可选配置 |
+
+**可选配置**:
+
+| 选项 | 说明 |
+|------|------|
+| `WithSellerID(id)` | 设置商家 ID（商务对接模式） |
+| `WithDomain(url)` | 自定义 API 域名（默认 `https://open.goofish.pro`） |
+| `WithHTTPClient(c)` | 自定义 HTTP 客户端 |
+| `WithDebug(true)` | 启用调试模式 |
+
+**示例**:
+```go
+client := open.NewClient("app_key", "app_secret")
+client := open.NewClient("app_key", "app_secret", open.WithSellerID("seller123"))
+```
+
+---
+
+### ApiResponse
+
+```go
+type ApiResponse struct {
+    Code    int             `json:"code"`    // 错误码，0 表示成功
+    Message string          `json:"message"` // 提示信息
+    Data    json.RawMessage `json:"data"`    // 原始业务数据
+    Success bool            `json:"success"` // 是否成功
+}
+```
+
+| 方法 | 签名 | 说明 |
+|------|------|------|
+| IsSuccess | `func (r *ApiResponse) IsSuccess() bool` | 判断是否成功（code == 0） |
+| UnmarshalData | `func (r *ApiResponse) UnmarshalData(v any) error` | 解析 data 字段到结构体 |
+| String | `func (r *ApiResponse) String() string` | 简洁字符串表示 |
+
+---
+
+### UserService — 用户模块
+
+#### GetAuthorizeList
+
+```go
+func (s *UserService) GetAuthorizeList(ctx context.Context) (*ApiResponse, error)
+```
+
+查询已授权的闲鱼店铺列表。
+
+**对应 API**: `POST /api/open/user/authorize/list`
+
+---
+
+### GoodService — 商品模块
+
+#### GetProductCategoryList
+
+```go
+func (s *GoodService) GetProductCategoryList(ctx context.Context, itemBizType ItemBizType, spBizType *SpBizType, flashSaleType *FlashSaleType) (*ApiResponse, error)
+```
+
+查询商品类目。**对应 API**: `POST /api/open/product/category/list`
+
+#### GetProductPvList
+
+```go
+func (s *GoodService) GetProductPvList(ctx context.Context, itemBizType ItemBizType, spBizType SpBizType, channelCatID string, subPropertyID *string) (*ApiResponse, error)
+```
+
+查询商品属性。**对应 API**: `POST /api/open/product/pv/list`
+
+#### GetProductList
+
+```go
+func (s *GoodService) GetProductList(ctx context.Context, req *GetProductListRequest) (*ApiResponse, error)
+```
+
+查询商品列表。**对应 API**: `POST /api/open/product/list`
+
+#### GetProductDetail
+
+```go
+func (s *GoodService) GetProductDetail(ctx context.Context, productID int64) (*ApiResponse, error)
+```
+
+查询商品详情。**对应 API**: `POST /api/open/product/detail`
+
+#### GetProductSkuList
+
+```go
+func (s *GoodService) GetProductSkuList(ctx context.Context, productIDs []int64) (*ApiResponse, error)
+```
+
+查询商品规格。**对应 API**: `POST /api/open/product/sku/list`
+
+#### CreateProduct
+
+```go
+func (s *GoodService) CreateProduct(ctx context.Context, productData any) (*ApiResponse, error)
+```
+
+创建商品（单个）。**对应 API**: `POST /api/open/product/create`
+
+#### ProductBatchCreate
+
+```go
+func (s *GoodService) ProductBatchCreate(ctx context.Context, productList []any) (*ApiResponse, error)
+```
+
+批量创建商品（每批最多 50 个）。**对应 API**: `POST /api/open/product/batchCreate`
+
+#### ProductPublish
+
+```go
+func (s *GoodService) ProductPublish(ctx context.Context, req *ProductPublishRequest) (*ApiResponse, error)
+```
+
+上架商品（异步）。**对应 API**: `POST /api/open/product/publish`
+
+#### ProductDownShelf
+
+```go
+func (s *GoodService) ProductDownShelf(ctx context.Context, productID int64) (*ApiResponse, error)
+```
+
+下架商品。**对应 API**: `POST /api/open/product/downShelf`
+
+#### ProductEdit
+
+```go
+func (s *GoodService) ProductEdit(ctx context.Context, productData any) (*ApiResponse, error)
+```
+
+编辑商品。**对应 API**: `POST /api/open/product/edit`
+
+#### ProductEditStock
+
+```go
+func (s *GoodService) ProductEditStock(ctx context.Context, req *ProductEditStockRequest) (*ApiResponse, error)
+```
+
+编辑商品库存和价格。**对应 API**: `POST /api/open/product/edit/stock`
+
+#### ProductDelete
+
+```go
+func (s *GoodService) ProductDelete(ctx context.Context, productID int64) (*ApiResponse, error)
+```
+
+删除商品。**对应 API**: `POST /api/open/product/delete`
+
+---
+
+### OrderService — 订单模块
+
+#### GetOrderList
+
+```go
+func (s *OrderService) GetOrderList(ctx context.Context, req *GetOrderListRequest) (*ApiResponse, error)
+```
+
+查询订单列表。**对应 API**: `POST /api/open/order/list`
+
+#### GetOrderDetail
+
+```go
+func (s *OrderService) GetOrderDetail(ctx context.Context, orderNo string) (*ApiResponse, error)
+```
+
+查询订单详情。**对应 API**: `POST /api/open/order/detail`
+
+#### KamOrderList
+
+```go
+func (s *OrderService) KamOrderList(ctx context.Context, orderNo string) (*ApiResponse, error)
+```
+
+查询订单卡密列表。**对应 API**: `POST /api/open/order/kam/list`
+
+#### OrderShip
+
+```go
+func (s *OrderService) OrderShip(ctx context.Context, req *OrderShipRequest) (*ApiResponse, error)
+```
+
+订单物流发货。**对应 API**: `POST /api/open/order/ship`
+
+**必填字段**: OrderNo、WaybillNo、ExpressName、ExpressCode
+**条件必填**: ShipDistrictID 或 (ShipProvName + ShipCityName + ShipAreaName)
+
+---
+
+### OtherService — 其他模块
+
+#### GetExpressCompanies
+
+```go
+func (s *OtherService) GetExpressCompanies(ctx context.Context) (*ApiResponse, error)
+```
+
+获取快递公司列表。**对应 API**: `POST /api/open/express/companies`
+
+---
+
+### 枚举类型
+
+| 枚举 | 类型 | 说明 |
+|------|------|------|
+| `ItemBizType` | `int` | 商品类型（Common=2, Inspected=0, InspectionBao=10, ...） |
+| `SpBizType` | `int` | 行业类型（Mobile=1, Trend=2, HomeAppliance=3, ...） |
+| `FlashSaleType` | `int` | 闲鱼特卖类型（LiQi=1, GuPin=2, ...） |
+| `ProductStatus` | `int` | 商品状态（Status21=21, ...） |
+| `SaleStatus` | `int` | 销售状态（OnSale=2, OffSale=3, ...） |
+| `OrderStatus` | `int` | 订单状态（PendingPayment=11, PendingShipment=12, ...） |
+| `RefundStatus` | `int` | 退款状态（Success=5, Rejected=6, ...） |
+
+---
+
+## search — 商品搜索爬虫
+
+`import "github.com/cv-cat/xianyuapis/pkg/search"`
+
+> 源自 [XIE7654/goofish_api/spider](https://github.com/XIE7654/goofish_api/tree/main/spider)，基于 Cookie 鉴权。
+> 使用 `mtop.taobao.idlemtopsearch.pc.search` API，依赖 `pkg/apis.XianyuAPI`。
+
+### Crawler 结构体
+
+```go
+type Crawler struct { /* 内部字段 */ }
+```
+
+### New
+
+```go
+func New(api *apis.XianyuAPI) *Crawler
+```
+
+创建搜索爬虫实例。
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| api | `*apis.XianyuAPI` | 已登录的 API 实例（需包含有效 Cookie） |
+
+### Search
+
+```go
+func (c *Crawler) Search(ctx context.Context, req *Request) ([]*Item, error)
+```
+
+执行关键词搜索，返回单页结果。
+
+**对应 API**: `mtop.taobao.idlemtopsearch.pc.search/1.0`
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| ctx | `context.Context` | 请求上下文 |
+| req | `*Request` | 搜索请求参数 |
+
+**Request 结构体**:
+
+```go
+type Request struct {
+    Keyword     string // 搜索关键词（必需）
+    PageNumber  int    // 页码，从 1 开始
+    RowsPerPage int    // 每页数量，默认 30
+    FromFilter  bool   // 是否来自筛选
+    SortValue   string // 排序值（可选）
+    SortField   string // 排序字段（可选）
+}
+```
+
+### SearchAll
+
+```go
+func (c *Crawler) SearchAll(ctx context.Context, req *Request, maxPages int) ([]*Item, error)
+```
+
+搜索所有页（最多 maxPages 页），聚合结果。
+
+### Item 结构体
+
+```go
+type Item struct {
+    UserName  string // 卖家用户名
+    Area      string // 地区
+    SoldPrice string // 售价
+    Title     string // 商品标题
+    DetailURL string // 详情页 URL
+    ItemID    string // 商品 ID
+    CreatedAt string // 采集时间
+}
+```
+
+**示例**:
+
+```go
+api, _ := apis.New(cookies, "")
+crawler := search.New(api)
+
+items, err := crawler.Search(ctx, &search.Request{
+    Keyword:     "机械键盘",
+    PageNumber:  1,
+    RowsPerPage: 30,
+})
+for _, item := range items {
+    fmt.Printf("%s | ¥%s | %s\n", item.Title, item.SoldPrice, item.DetailURL)
+}
+```
